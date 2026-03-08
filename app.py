@@ -4,12 +4,12 @@ app.py — BCGEU Collective Agreement RAG Chatbot
 Tech stack:
   - LlamaIndex  : PDF → chunk → vector index (512 token chunks, 100 overlap)
   - Chroma DB   : local persistent vector store  (./chroma_db)
-  - Ollama      : Llama 3.1:8b LLM + nomic-embed-text embeddings (local)
+  - Ollama      : Llama 3.2:3b LLM + nomic-embed-text embeddings (local)
   - Gradio      : Web UI at http://localhost:7860
 
 Quick start:
   1. Install Ollama and pull the required models:
-       ollama pull llama3.1:8b
+       ollama pull llama3.2:3b
        ollama pull nomic-embed-text
   2. pip install -r requirements.txt
   3. python app.py
@@ -173,7 +173,14 @@ def configure_llm() -> None:
     Settings.llm = Ollama(
         model=OLLAMA_MODEL,
         base_url=OLLAMA_BASE_URL,
-        request_timeout=120.0,
+        # CPU inference: model load (~30 s) + generation (~2 min) for llama3.1:8b.
+        # 600 s gives comfortable headroom; tune down if GPU is added later.
+        request_timeout=600.0,
+        # num_ctx caps the KV-cache allocation at model-load time.
+        # llama3.1:8b defaults to 131k context → 16 GiB KV cache → OOM.
+        # 4096 is sufficient for RAG (5 chunks × 512 tokens = 2560 max input).
+        # num_predict caps output length; prevents 8-min responses on CPU.
+        additional_kwargs={"num_ctx": 4096, "num_predict": 512},
     )
     Settings.embed_model = OllamaEmbedding(
         model_name=EMBED_MODEL,
@@ -440,8 +447,6 @@ def on_submit(
 # ─── Gradio UI ────────────────────────────────────────────────────────────────
 def build_ui() -> gr.Blocks:
     """Assemble and return the Gradio Blocks application."""
-    configure_llm()
-
     with gr.Blocks(
         title="BCGEU Collective Agreement Chatbot",
         theme=gr.themes.Soft(),
@@ -539,11 +544,34 @@ All answers come directly from the selected document.
 
         clear_btn.click(fn=lambda: [], outputs=[chatbot])
 
+        # Auto-load the default agreement when a new session opens.
+        # Hits the Chroma cache populated by preindex_agreements() — completes in ~1s.
+        demo.load(
+            fn=on_load_agreement,
+            inputs=[agreement_dd, pdf_upload],
+            outputs=[status_box, engine_state, chatbot],
+        )
+
     return demo
+
+
+# ─── Pre-indexer ──────────────────────────────────────────────────────────────
+def preindex_agreements() -> None:
+    """
+    Index every agreement into Chroma at startup so the first UI load is instant.
+    Skips agreements already present in the vector store.
+    Runs synchronously before the Gradio server starts.
+    """
+    for name in AGREEMENT_NAMES:
+        print(f"[preindex] Checking '{name}'…")
+        _, status = get_query_engine(name)
+        print(f"[preindex] {status}")
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    configure_llm()
+    preindex_agreements()
     app = build_ui()
     app.launch(
         server_name="0.0.0.0",
