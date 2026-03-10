@@ -14,5 +14,5 @@ jobs:
     uses: ./.github/workflows/deploy-hf-spaces-reusable.yml
     with:
       space_name: 'DerekRoberts/landru'
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      environment: 'test'
+    secrets: inherit
