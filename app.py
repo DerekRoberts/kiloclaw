@@ -25,34 +25,17 @@ import json
 import os
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 # Ensure the HuggingFace model cache is writable and persistent.
 # Move this out of /tmp to avoid being shadowed by the tmpfs mount in compose.yml.
 os.environ.setdefault("HF_HOME", "/app/hf_cache")
 
-# ─── Third-party: PDF ────────────────────────────────────────────────────────
-print("[boot] Importing pypdf...", flush=True)
-from pypdf import PdfReader
-
-# ─── Third-party: Embeddings (local, no API key) ────────────────────────────
-print("[boot] Importing sentence_transformers (pulls torch)...", flush=True)
-from sentence_transformers import SentenceTransformer
-
-# ─── Third-party: Vector Store (FAISS) ──────────────────────────────────────
-print("[boot] Importing faiss...", flush=True)
-import faiss
-import numpy as np
-
-# ─── Third-party: LLM (Anthropic) ───────────────────────────────────────────
-print("[boot] Importing anthropic...", flush=True)
-import anthropic
-
-# ─── Third-party: Gradio UI ──────────────────────────────────────────────────
-print("[boot] Importing gradio...", flush=True)
-import gradio as gr
-print("[boot] All imports complete.", flush=True)
+# ─── Third-party: Deferred Imports ───────────────────────────────────────────
+# (numpy, pypdf, anthropic, faiss, sentence_transformers, gradio)
+# are imported inside functions to keep startup and test-loading fast.
+print("[boot] All boilerplate complete.", flush=True)
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 PDF_CACHE_DIR = Path("./pdf_cache")
@@ -69,8 +52,8 @@ _GITHUB_RAW_BASE = (
 
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 512))       # tokens per chunk
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 100)) # token overlap
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 256))       # tokens per chunk
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))  # token overlap
 SIMILARITY_TOP_K = int(os.getenv("SIMILARITY_TOP_K", 5))
 
 # Memory / Context Condensation
@@ -84,25 +67,34 @@ VEXILON_PASSWORD = os.getenv("VEXILON_PASSWORD")
 # Embedding dimension for all-MiniLM-L6-v2
 EMBED_DIM = 384
 
+# ─── Typing ──────────────────────────────────────────────────────────────────
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    import gradio as gr
+
 # ─── Clients ─────────────────────────────────────────────────────────────────
-_embed_model: SentenceTransformer | None = None
-_anthropic_client: anthropic.Anthropic | None = None
+_embed_model: "SentenceTransformer | None" = None
+_anthropic_client: "anthropic.AsyncAnthropic | None" = None
 
 
-def get_embed_model() -> SentenceTransformer:
+def get_embed_model() -> "SentenceTransformer":
     global _embed_model
     if _embed_model is None:
         print(f"[embed] Loading local embedding model '{EMBED_MODEL}'…")
+        from sentence_transformers import SentenceTransformer
         _embed_model = SentenceTransformer(EMBED_MODEL)
         print("[embed] Embedding model ready.")
     return _embed_model
 
 
-def get_anthropic() -> anthropic.Anthropic:
+def get_anthropic() -> "anthropic.AsyncAnthropic":
     global _anthropic_client
     if _anthropic_client is None:
+        import anthropic
         # Reads ANTHROPIC_API_KEY from environment automatically; raises AuthenticationError if missing
-        _anthropic_client = anthropic.Anthropic()
+        _anthropic_client = anthropic.AsyncAnthropic()
     return _anthropic_client
 
 
@@ -141,8 +133,11 @@ def chunk_text(text: str, page_num: int) -> list[dict]:
     Split *text* into overlapping token-based chunks using the embedding model's tokenizer.
     Returns list of dicts: {text, page, chunk_index}.
     """
+    if not text.strip():
+        return []
     tokenizer = get_embed_model().tokenizer
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    # Ensure the tokenizer doesn't truncate the whole page so we can split it manually
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
     tokens = encoding.input_ids
     offsets = encoding.offset_mapping
     chunks = []
@@ -177,6 +172,7 @@ def load_pdf_chunks(pdf_path: Path) -> list[dict]:
     Parse the PDF at *pdf_path* and return all chunks with page metadata.
     Page numbers are 1-based (matching the printed page numbers in the PDF).
     """
+    from pypdf import PdfReader
     reader = PdfReader(str(pdf_path))
     all_chunks = []
     for page_idx, page in enumerate(reader.pages):
@@ -188,19 +184,21 @@ def load_pdf_chunks(pdf_path: Path) -> list[dict]:
 
 
 # ─── FAISS Index ──────────────────────────────────────────────────────────────
-def embed_texts(texts: list[str]) -> np.ndarray:
+def embed_texts(texts: list[str]) -> "np.ndarray":
     """Embed a list of texts using the local sentence-transformers model. Returns (N, EMBED_DIM) float32 array."""
+    import numpy as np
     model = get_embed_model()
     # encode() handles batching internally; show_progress_bar=False keeps logs clean
     embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
     return embeddings.astype(np.float32)
 
 
-def build_index(chunks: list[dict]) -> faiss.IndexFlatIP:
+def build_index(chunks: list[dict]) -> "faiss.IndexFlatIP":
     """
     Embed all chunks and build a FAISS inner-product index.
     Vectors are L2-normalised so inner product == cosine similarity.
     """
+    import faiss
     texts = [c["text"] for c in chunks]
     print(f"[index] Embedding {len(texts)} chunks locally (may take 30–90 s on CPU)…")
     t0 = time.time()
@@ -215,12 +213,13 @@ def build_index(chunks: list[dict]) -> faiss.IndexFlatIP:
 
 
 def search_index(
-    index: faiss.IndexFlatIP,
+    index: "faiss.IndexFlatIP",
     chunks: list[dict],
     query: str,
     top_k: int = SIMILARITY_TOP_K,
 ) -> list[dict]:
     """Return the top-k most similar chunks for *query*."""
+    import faiss
     query_vec = embed_texts([query])  # (1, EMBED_DIM)
     faiss.normalize_L2(query_vec)
     _scores, indices = index.search(query_vec, top_k)
@@ -229,18 +228,19 @@ def search_index(
 
 # ─── RAG App State (module-level, built at startup) ──────────────────────────
 _chunks: list[dict] = []
-_index: faiss.IndexFlatIP | None = None
+_index: "faiss.IndexFlatIP | None" = None
 
 
-def save_index(index: faiss.IndexFlatIP, chunks: list[dict]) -> None:
+def save_index(index: "faiss.IndexFlatIP", chunks: list[dict]) -> None:
     """Persist the FAISS index and chunk metadata to pdf_cache/ for fast cold starts."""
+    import faiss
     faiss.write_index(index, str(INDEX_PATH))
     with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
         json.dump(chunks, f, ensure_ascii=False)
     print(f"[index] Saved index → {INDEX_PATH} and chunks → {CHUNKS_PATH}")
 
 
-def load_precomputed_index() -> tuple[faiss.IndexFlatIP, list[dict]] | tuple[None, None]:
+def load_precomputed_index() -> tuple["faiss.IndexFlatIP", list[dict]] | tuple[None, None]:
     """
     Load a pre-computed FAISS index and chunks from disk if both exist.
     Returns (index, chunks) on success, (None, None) if files are missing.
@@ -248,6 +248,7 @@ def load_precomputed_index() -> tuple[faiss.IndexFlatIP, list[dict]] | tuple[Non
     if not INDEX_PATH.exists() or not CHUNKS_PATH.exists():
         return None, None
     print(f"[startup] Loading pre-computed index from {INDEX_PATH}…")
+    import faiss
     index = faiss.read_index(str(INDEX_PATH))
     with open(CHUNKS_PATH, encoding="utf-8") as f:
         chunks = json.load(f)
@@ -315,7 +316,7 @@ def startup(force_rebuild: bool = False) -> None:
 
 
 # ─── RAG Query ────────────────────────────────────────────────────────────────
-def condense_query(message: str, history: list[dict]) -> str:
+async def condense_query(message: str, history: list[dict]) -> str:
     """
     Use Claude to condense conversation history and the latest message into a 
     standalone, search-friendly query.
@@ -340,6 +341,8 @@ def condense_query(message: str, history: list[dict]) -> str:
             ]
             raw_content = "".join(text_parts)
         
+        # Ensure it is a string before slicing/concatenating
+        raw_content = str(raw_content)
         msg_len = CONDENSE_QUERY_CONTENT_MAX_LEN
         content = raw_content[:msg_len] + ("..." if len(raw_content) > msg_len else "")
         context_lines.append(f"{role}: {content}")
@@ -356,7 +359,7 @@ def condense_query(message: str, history: list[dict]) -> str:
     )
 
     try:
-        response = client.messages.create(
+        response = await client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}]
@@ -364,15 +367,13 @@ def condense_query(message: str, history: list[dict]) -> str:
         condensed = response.content[0].text.strip().strip('"')
         print(f"[rag] Condensed query: '{message}' -> '{condensed}'")
         return condensed
-    except anthropic.APIError as exc:
-        print(f"[rag] Query condensation failed (API Error): {exc}. Using raw message.")
-        return message
     except Exception as exc:
-        print(f"[rag] Query condensation failed (Unexpected): {exc}. Using raw message.")
+        # We catch generic Exception here since anthropic is deferredly imported
+        print(f"[rag] Query condensation failed: {exc}. Using raw message.")
         return message
 
 
-def rag_stream(message: str, history: list[dict]) -> Iterator[str]:
+async def rag_stream(message: str, history: list[dict]) -> AsyncIterator[str]:
     """
     Retrieve relevant chunks, build the prompt, and stream a response from Claude.
     *history* is a list of {"role": ..., "content": ...} dicts (Gradio messages format).
@@ -383,7 +384,7 @@ def rag_stream(message: str, history: list[dict]) -> Iterator[str]:
         return
 
     # Rewrite query for RAG if there is history
-    query = condense_query(message, history)
+    query = await condense_query(message, history)
     relevant_chunks = search_index(_index, _chunks, query)
 
     # Build context block from retrieved chunks
@@ -410,15 +411,15 @@ def rag_stream(message: str, history: list[dict]) -> Iterator[str]:
 
     client = get_anthropic()
     try:
-        with client.messages.stream(
+        async with client.messages.stream(
             model=CLAUDE_MODEL,
             max_tokens=1024,
             system=full_system,
             messages=messages,
         ) as stream:
-            for text_chunk in stream.text_stream:
+            async for text_chunk in stream.text_stream:
                 yield text_chunk
-    except anthropic.APIError as exc:
+    except Exception as exc:
         yield f"\n\n⚠️ API error: {exc}"
 
 
@@ -448,8 +449,9 @@ DISCLAIMER_HTML = (
 
 
 
-def build_ui() -> gr.Blocks:
+def build_ui() -> "gr.Blocks":
     """Assemble and return the Gradio Blocks application."""
+    import gradio as gr
     with gr.Blocks(title="Vexilon — BCGEU Agreement Assistant") as demo:
 
         # ── Header ────────────────────────────────────────────────────────────
@@ -495,9 +497,10 @@ def build_ui() -> gr.Blocks:
             send_btn = gr.Button("Send ➤", scale=1, variant="primary")
 
         # ── Submit handlers ───────────────────────────────────────────────────
-        def submit(
+        async def submit(
             message: str, history: list[dict]
-        ) -> Iterator[tuple[list[dict], str, dict, dict]]:
+        ) -> AsyncIterator[tuple[list[dict], str, dict, dict]]:
+            import gradio as gr
             hide = gr.update(visible=False)
             show = gr.update(visible=True)
             if not message.strip():
@@ -513,7 +516,7 @@ def build_ui() -> gr.Blocks:
             yield history, "", hide, hide
             # Stream tokens from RAG; accumulate into the assistant bubble
             accumulated = ""
-            for chunk in rag_stream(message, prior_history):
+            async for chunk in rag_stream(message, prior_history):
                 accumulated += chunk
                 history[-1]["content"] = accumulated
                 yield history, "", hide, hide
