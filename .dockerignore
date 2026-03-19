@@ -1,5 +1,7 @@
 # Exclude large cache directories from docker build context
 hf_cache/
+# The FAISS index and chunks are built inside the image via a RUN step in
+# the Containerfile; they don't need to be in the build context.
 pdf_cache/
 
 # Standard Python ignores
@@ -8,7 +10,3 @@ __pycache__/
 .venv/
 .pytest_cache/
 .coverage
-
-# FAISS and persistence
-*.faiss
-*chunks.json

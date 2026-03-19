@@ -23,9 +23,9 @@ import sys
 print("[boot] Python started, importing stdlib...", flush=True)
 import json
 import os
-import shutil
 import time
 import urllib.request
+from urllib.error import URLError
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -152,31 +152,43 @@ def get_anthropic() -> "anthropic.AsyncAnthropic":
 
 
 # ─── System Prompt ───────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are Vexilon, a highly authoritative professional assistant for BCGEU union stewards. \
-You have access to a comprehensive, full-text library of the following documents:
+SYSTEM_PROMPT = """You are Vexilon, a highly authoritative professional assistant for BCGEU union stewards.
 
---- KNOWLEDGE MANIFEST ---
-1. FULL TEXT: 19th Main Public Service Agreement (Effective 2022-2025) - The core contract (215 pages).
-2. FULL TEXT: BC Employment Standards Act [RSBC 1996]
-3. FULL TEXT: BC Labour Relations Code
-4. FULL TEXT: BC Human Rights Code
-5. SUPPORT: BCGEU Steward Resource Manual & Ethics Guidelines
-6. SUPPORT: Gov BC Standards of Conduct
+--- HOW YOUR SEARCH WORKS ---
+Your library contains the COMPLETE, full text of these documents:
+1. 19th Main Public Service Agreement (2022-2025) — all 37 Articles, all Appendices, all MOUs (215 pages)
+2. BC Employment Standards Act [RSBC 1996]
+3. BC Labour Relations Code [RSBC 1996]
+4. BC Human Rights Code [RSBC 1996]
+5. BCGEU Steward Resource Manual & Ethics Guidelines
+6. Gov BC Standards of Conduct
+
+IMPORTANT: For each question you receive, a semantic search retrieves the most relevant \
+excerpts from this library. You see a SUBSET of the library per query — not the whole thing. \
+Content that does not appear in the excerpts below may still exist in the library; it simply \
+was not retrieved for THIS particular question. \
+NEVER claim that an Article, section, or document is "missing" or "not in my documents" \
+just because it is not in the current excerpts. Instead, say: \
+"The specific text was not retrieved for this search. Try asking about [topic] directly."
 --------------------------
 
 Rules you must follow without exception:
 
-1. PRECISION OVER HELPFULNESS: If the search results show only a Table of Contents entry or a reference to a section (e.g., "See Section 10.4") but the actual text of that section is NOT in your retrieved snippets, you MUST state that the specific language is not available in your current view. NEVER assume or guess the content of a missing section.
+1. ANSWER FROM EXCERPTS ONLY: Base your answer strictly on the excerpts provided below. \
+If the excerpts contain only a reference to a section (e.g., "See Section 10.4") but not the \
+actual text, say the specific language was not retrieved for this search and suggest the user \
+ask about that section directly. NEVER guess or fabricate contract language.
 2. Every claim must be supported by a verbatim quote from the provided excerpts, formatted as a markdown blockquote (> "...") followed by its citation: — [Document Name], Article/Section [X], [Title if available], p. [N]
 3. Plain-language explanation comes BEFORE the verbatim quote, not after.
 4. ALWAYS prioritize and lead with the Collective Agreement (Main Agreement) as the primary authority.
-5. If you detect a "gap" (e.g., you see Section 10.1 and 10.3 but not 10.2), explicitly inform the user: "I see a gap in the retrieved sections. Please allow me to BROADEN my search or check the specific Article yourself."
+5. If consecutive sections appear with a gap (e.g., you see 10.1 and 10.3 but not 10.2), note the gap and suggest the user ask about the missing section specifically.
 6. Do not predict outcomes or give legal opinions.
-7. Tone: professional, forensic, and confident but cautious about data gaps.
+7. Tone: professional, forensic, and confident. Do NOT be apologetic about retrieval limitations — the library is comprehensive; the search just needs more specific queries.
 8. Cite every relevant clause separately.
 9. Maintain conversational continuity. Use the previous conversation context and the provided excerpts.
 10. If the search results are contradictory or unclear, flag this ambiguity to the user immediately.
-11. Search deeply: Every chunk in your library is tagged with its Article or Appendix name to ensure context is never lost.
+11. Every chunk is tagged with its Article or Appendix name for context.
+12. If asked about your capabilities, knowledge gaps, or what documents you have: describe the library manifest above. Do NOT audit or list "missing" articles — you have the complete text of everything listed above.
 
 Response format:
 
@@ -184,8 +196,6 @@ Response format:
 
 > "[Verbatim quote]"
 — [Document Name], Article/Section [X], p. [N]
-
-[Optional: "Data Gap Warning: Text for Section [X.Y] was not retrieved in this search."]
 """
 
 # ─── Chunking ─────────────────────────────────────────────────────────────────
@@ -227,10 +237,72 @@ def chunk_text(full_text: str, token_data: list[tuple[int, int, int, str]], sour
 
 
 # ─── PDF Loader ───────────────────────────────────────────────────────────────
+
+def _is_toc_or_index_page(page_text: str) -> bool:
+    """
+    Detect whether a page is a Table of Contents or alphabetical Index page.
+
+    These navigational pages mention every article/clause by name but contain
+    no substantive content. Indexing them causes TOC entries to dominate
+    semantic search results, drowning out actual contract text.
+
+    Returns True if the page appears to be TOC/index content.
+    """
+    import re
+    lines = [l.strip() for l in page_text.split("\n") if l.strip()]
+    if not lines:
+        return False
+
+    # Heuristic 1: 3+ dot-leader lines (..........) strongly indicates a TOC page
+    dot_leader_count = sum(1 for l in lines if l.count(".") >= 8 and ".." in l)
+    if dot_leader_count >= 3:
+        return True
+
+    # Heuristic 2: >40% of lines match index-style pattern "Some Text ... NN"
+    # e.g. "Abandonment of Position, 10.10 ........ 23"
+    index_line_re = re.compile(r".{10,}\.\s*\d{1,3}\s*$")
+    index_count = sum(1 for l in lines if index_line_re.search(l))
+    if len(lines) >= 5 and index_count / len(lines) > 0.4:
+        return True
+
+    return False
+
+
+def _clean_page_text(page_text: str) -> str:
+    """
+    Remove noise artifacts injected by web-based PDF extraction.
+
+    BC statute PDFs (ESA, Human Rights Code, Labour Relations Code) were
+    exported from bclaws.gov.bc.ca and contain repeated URL lines and
+    date-stamps that waste ~30 tokens per chunk and dilute embedding quality.
+    """
+    import re
+    # Remove bclaws.gov.bc.ca URL lines
+    page_text = re.sub(
+        r"https?://www\.bclaws\.gov\.bc\.ca/\S*",
+        "",
+        page_text,
+    )
+    # Remove date/time stamps from web-to-PDF artifacts, e.g.:
+    # "17/03/2026, 08:44 Employment Standards Act"
+    page_text = re.sub(
+        r"\d{2}/\d{2}/\d{4},?\s*\d{2}:\d{2}\s+[A-Z][^\n]*",
+        "",
+        page_text,
+    )
+    # Collapse runs of 3+ blank lines down to a single blank line
+    page_text = re.sub(r"\n{3,}", "\n\n", page_text)
+    return page_text.strip()
+
+
 def load_pdf_chunks(pdf_path: Path) -> list[dict]:
     """
     Parse the PDF at *pdf_path* into one continuous stream before chunking.
     This bridges page boundaries so sentences that span pages aren't decapitated.
+
+    Navigational pages (Table of Contents, alphabetical Index) are skipped
+    so they don't contaminate semantic search results.  URL artifacts from
+    web-extracted statute PDFs are also stripped before embedding.
     """
     from pypdf import PdfReader
     import re
@@ -245,21 +317,40 @@ def load_pdf_chunks(pdf_path: Path) -> list[dict]:
     
     current_header = ""
     header_pattern = re.compile(r"^\s*(ARTICLE|APPENDIX)\s+(\d+|[A-Z]+)", re.IGNORECASE)
-    
+    skipped_pages = 0
+
     for page_idx, page in enumerate(reader.pages):
         page_num = page_idx + 1
         page_text = page.extract_text() or ""
         if not page_text.strip():
             continue
+
+        # Skip pure navigational pages (TOC / alphabetical Index).
+        # These mention every article by name but add no substantive content;
+        # indexing them causes TOC entries to crowd out real contract text in
+        # semantic search results.
+        if _is_toc_or_index_page(page_text):
+            skipped_pages += 1
+            continue
+
+        # Strip web-extraction artifacts (URLs, timestamps) from statute PDFs.
+        page_text = _clean_page_text(page_text)
+        if not page_text.strip():
+            continue
             
         # Update breadcrumb header context
-        for line in page_text.split("\n")[:10]:
-            if ".........." in line or line.strip().endswith((".",)) and re.search(r"\d+$", line.strip()):
+        # Look through more lines - headers can appear anywhere on the page due to
+        # complex PDF layouts (two-column, footnotes, etc.)
+        page_lines = page_text.split("\n")
+        lines_to_check = min(50, len(page_lines))
+        for line in page_lines[:lines_to_check]:
+            # Skip TOC-style entries and page numbers
+            if ".........." in line or (line.strip().endswith(".") and re.search(r"\d+$", line.strip())):
                 continue
             match = header_pattern.search(line)
             if match:
                 current_header = match.group(0).strip().upper()
-                break # Usually one primary header per page top
+                break # Usually one primary header per page
 
         # Track offsets in the global full_text
         page_offset = len(full_text)
@@ -269,11 +360,14 @@ def load_pdf_chunks(pdf_path: Path) -> list[dict]:
         encoding = tokenizer(page_text, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
         for start, end in encoding.offset_mapping:
             token_metadata.append((
-                page_offset + start, 
-                page_offset + end, 
-                page_num, 
+                page_offset + start,
+                page_offset + end,
+                page_num,
                 current_header
             ))
+
+    if skipped_pages:
+        print(f"[loader] Skipped {skipped_pages} navigational pages (TOC/index) in '{source_name}'.")
             
     return chunk_text(full_text, token_metadata, source_name)
 
@@ -370,8 +464,51 @@ def _fetch_pdf_cache_if_missing() -> None:
     for path, url in files.items():
         if not path.exists():
             print(f"[startup] Downloading {path.name} from GitHub…")
-            urllib.request.urlretrieve(url, path)
-            print(f"[startup] {path.name} downloaded ({path.stat().st_size:,} bytes).")
+            try:
+                urllib.request.urlretrieve(url, path)
+                print(f"[startup] {path.name} downloaded ({path.stat().st_size:,} bytes).")
+            except URLError as e:
+                print(f"[startup] Failed to download {path.name}: {e}. Will build from PDFs instead.")
+                # Clean up any partial downloads
+                if path.exists():
+                    path.unlink()
+                return
+
+
+def build_index_from_pdfs() -> None:
+    """
+    Parse all PDFs in LABOUR_LAW_DIR, embed them, and write the pre-built index to
+    pdf_cache/index.faiss + pdf_cache/chunks.json.
+
+    This function does NOT require ANTHROPIC_API_KEY — it only uses the local
+    embedding model and the PDF files.  It is called during container image build:
+        RUN python -c "from app import build_index_from_pdfs; build_index_from_pdfs()"
+
+    Maintainers should also run this locally after adding or updating documents:
+        python -c "from app import build_index_from_pdfs; build_index_from_pdfs()"
+    then commit the updated pdf_cache/ files (needed only for the HF-Spaces
+    GitHub-download fallback — the container image already has them baked in).
+    """
+    global _chunks, _index
+    print(f"[build] Scanning for PDFs in {LABOUR_LAW_DIR}…")
+    if not LABOUR_LAW_DIR.exists():
+        print(f"[build] {LABOUR_LAW_DIR} does not exist — nothing to index.")
+        return
+
+    pdf_files = list(LABOUR_LAW_DIR.glob("*.pdf"))
+    if not pdf_files:
+        print("[build] No PDF files found to index!")
+        return
+
+    _chunks = []
+    for pdf in pdf_files:
+        _chunks.extend(load_pdf_chunks(pdf))
+
+    num_chunks = len(_chunks)
+    print(f"[build] Total {num_chunks} chunks loaded from {len(pdf_files)} files.")
+    _index = build_index(_chunks)
+    save_index(_index, _chunks)
+    print("[build] Index written to pdf_cache/.")
 
 
 def startup(force_rebuild: bool = False) -> None:
@@ -379,13 +516,13 @@ def startup(force_rebuild: bool = False) -> None:
     Load the FAISS index and chunks.
 
     Fast path (normal operation): loads pre-computed index.faiss + chunks.json from pdf_cache/.
-    Slow path (first run or force_rebuild=True): parses the PDF, embeds all chunks, saves to disk.
+    Slow path (first run or force_rebuild=True): calls build_index_from_pdfs().
 
     On Hugging Face Spaces, pdf_cache/ is not committed to the Space git repo (HF rejects
     binary files). _fetch_pdf_cache_if_missing() downloads the assets from GitHub on first run.
 
-    After updating the agreement PDF, run:
-        python -c "from app import startup; startup(force_rebuild=True)"
+    After updating documents, rebuild the index:
+        python -c "from app import build_index_from_pdfs; build_index_from_pdfs()"
     """
     global _chunks, _index
     get_anthropic()  # Ping early to catch missing ANTHROPIC_API_KEY
@@ -400,28 +537,8 @@ def startup(force_rebuild: bool = False) -> None:
             print("[startup] Ready.")
             return
 
-    # ── Slow path: build from scratch ────────────────────────────────────
-    print(f"[startup] Scanning for PDFs in {LABOUR_LAW_DIR}…")
-    if not LABOUR_LAW_DIR.exists():
-        LABOUR_LAW_DIR.mkdir(parents=True, exist_ok=True)
-        # If empty, copy the default agreement from cache if it exists
-        default_pdf = PDF_CACHE_DIR / "bcgeu_19th_main_agreement.pdf"
-        if default_pdf.exists():
-            shutil.copy(default_pdf, LABOUR_LAW_DIR / "bcgeu_19th_main_agreement.pdf")
-
-    pdf_files = list(LABOUR_LAW_DIR.glob("*.pdf"))
-    if not pdf_files:
-        print("[startup] No PDF files found to index!")
-        return
-
-    _chunks = []
-    for pdf in pdf_files:
-        _chunks.extend(load_pdf_chunks(pdf))
-    
-    num_chunks = len(_chunks)
-    print(f"[startup] Total {num_chunks} chunks loaded from {len(pdf_files)} files.")
-    _index = build_index(_chunks)
-    save_index(_index, _chunks)
+    # ── Slow path: delegate to the API-key-free build function ────────────
+    build_index_from_pdfs()
     print("[startup] Ready.")
 
 
