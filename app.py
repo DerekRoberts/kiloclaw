@@ -179,6 +179,38 @@ def get_knowledge_manifest() -> str:
     return "\n".join(lines)
 
 
+def build_pdf_download_links() -> str:
+    """
+    Generate markdown for individual PDF download links using Gradio's /file= endpoint.
+    Returns markdown-formatted links for each PDF in the labour_law directory.
+    """
+    if not LABOUR_LAW_DIR.exists():
+        return ""
+
+    pdfs = sorted(LABOUR_LAW_DIR.glob("*.pdf"))
+    if not pdfs:
+        return ""
+
+    # Use HTML list for better Gradio rendering compatibility
+    lines = ["<b>Download Documents:</b>", "<ul>"]
+    for pdf in pdfs:
+        stem = pdf.stem
+        # Parse convention: Index_Category_Title
+        parts = stem.split("_", 2)
+        if len(parts) == 3:
+            idx, cat, title = parts
+            display_name = f"{idx}. {title} ({cat})"
+        else:
+            display_name = stem.replace("_", " ").title()
+
+        # Use /gradio_api/file= endpoint (Gradio 6 static file serving)
+        file_path = str(pdf.absolute())
+        lines.append(f'<li><a href="/gradio_api/file={file_path}" target="_blank">{display_name}</a></li>')
+
+    lines.append("</ul>")
+    return "\n".join(lines)
+
+
 # ─── System Prompt ───────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Vexilon, a highly authoritative professional assistant for BCGEU union stewards.
 
@@ -770,12 +802,10 @@ def build_ui() -> "gr.Blocks":
         gr.Markdown("## BCGEU Steward Assistant")
 
         with gr.Accordion("Knowledge Base & Priority", open=False):
-            gr.Markdown(f"""
-            The **Collective Agreement** is our primary reference. Anything else provides additional context.
-            
-            All source documents are available for review:
-            [📁 Browse Knowledge Base on GitHub]({GITHUB_LABOUR_LAW_URL})
-            """)
+            gr.Markdown("**The Collective Agreement** is our primary reference. Anything else provides additional context.")
+            # Use gr.HTML() to preserve clickable links (gr.Markdown sanitizes HTML)
+            gr.HTML(build_pdf_download_links())
+            gr.Markdown(f"[📁 Browse Knowledge Base on GitHub]({GITHUB_LABOUR_LAW_URL})")
 
         # ── Disclaimer (persistent, non-dismissible) ──────────────────────────
         gr.HTML(DISCLAIMER_HTML)
@@ -866,10 +896,14 @@ if __name__ == "__main__":
         auth_creds = (VEXILON_USERNAME, VEXILON_PASSWORD)
         print(f"[startup] Authentication enabled for user '{VEXILON_USERNAME}'")
 
+    # Build allowed_paths: allow specific PDF files in LABOUR_LAW_DIR (security: only PDFs)
+    # Allow access to PDF files
+    allowed_pdf_paths = [str(p.absolute()) for p in LABOUR_LAW_DIR.glob("*.pdf")]
+
     app.launch(
         server_name="0.0.0.0",
         server_port=int(os.getenv("PORT", 7860)),
         share=False,
-        allowed_paths=[],
+        allowed_paths=allowed_pdf_paths,
         auth=auth_creds,
     )
