@@ -28,6 +28,9 @@ import os
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+import datetime
+import tempfile
+
 
 # Ensure the HuggingFace model cache is writable and persistent.
 # Inside the container (WORKDIR /app), this resolves to /app/hf_cache.
@@ -206,7 +209,7 @@ _rate_limiter = RateLimiter(
 )
 
 # Two-Bot Self-Review Pipeline (Issue #104)
-USE_REVIEWER = os.getenv("USE_REVIEWER", "true").lower() == "true"
+USE_REVIEWER = os.getenv("USE_REVIEWER", "false").lower() == "true"
 REVIEWER_MODEL = os.getenv("REVIEWER_MODEL", "claude-haiku-4-5-20251001")
 
 
@@ -1177,6 +1180,66 @@ async def rag_review_stream(
         yield f"\n\n⚠️ API error: {exc}"
 
 
+# ─── Export & Import ──────────────────────────────────────────────────────────
+
+
+def history_to_markdown(history: list[dict]) -> str:
+    """Convert chat history to a Markdown string."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    md = f"# Vexilon Conversation Export - {timestamp}\n\n"
+
+    for turn in history:
+        role = turn["role"].capitalize()
+        # content can be a string or a list of blocks in Gradio 6
+        content = turn["content"]
+        if isinstance(content, list):
+            # Extract text from message parts
+            text_parts = [
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            ]
+            content = "".join(text_parts)
+
+        md += f"### {role}\n{content}\n\n"
+
+    return md
+
+
+def markdown_to_history(file_path: str) -> list[dict]:
+    """Parse a Markdown conversation file back into a list of dicts."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    history = []
+    current_role = None
+    current_content = []
+
+    for line in lines:
+        new_role = None
+        if line.startswith("### User"):
+            new_role = "user"
+        elif line.startswith("### Assistant"):
+            new_role = "assistant"
+
+        if new_role:
+            if current_role:
+                history.append(
+                    {"role": current_role, "content": "\n".join(current_content).strip()}
+                )
+            current_role = new_role
+            current_content = []
+        elif current_role:
+            current_content.append(line.rstrip("\n"))
+
+    # Append the last turn
+    if current_role:
+        history.append(
+            {"role": current_role, "content": "\n".join(current_content).strip()}
+        )
+
+    return history
+
+
 # ─── Gradio UI ────────────────────────────────────────────────────────────────
 EXAMPLE_QUESTIONS = [
     "What are the just cause requirements for discipline?",
@@ -1242,15 +1305,16 @@ def build_ui() -> "gr.Blocks":
             show_label=False,
         )
 
-        # ── Reviewer Toggle ───────────────────────────────────────────────────
+        # ── Reviewer Toggle & Management ──────────────────────────────────────
         with gr.Row():
             reviewer_toggle = gr.Checkbox(
                 label="Enable Senior Rep Review (Two-Bot Pipeline)",
                 value=USE_REVIEWER,
-                scale=1,
+                scale=3,
             )
-            gr.Markdown(
-                "<span style='color:#6b7280;font-size:0.85rem'>Bot B verifies Bot A's output for accuracy</span>"
+            export_btn = gr.DownloadButton("⬇️ Save Chat", variant="secondary", scale=1)
+            import_btn = gr.UploadButton(
+                "⬆️ Load Chat", file_types=[".md"], variant="secondary", scale=1
             )
 
         # ── Input row ─────────────────────────────────────────────────────────
@@ -1332,6 +1396,52 @@ def build_ui() -> "gr.Blocks":
                 inputs=submit_inputs,
                 outputs=submit_outputs,
             )
+
+        # ── Export/Import Handlers ───────────────────────────────────────────
+        def handle_export(history):
+            if not history:
+                return None
+
+            md_str = history_to_markdown(history)
+
+            # Format filename as requested: 2026-03-24_09-19.md
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+            filename = f"{timestamp}.md"
+
+            # Use os.path.join for robust path handling
+            save_path = os.path.join(tempfile.gettempdir(), filename)
+
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(md_str)
+
+            # Cleanup timer (10 mins)
+            def cleanup():
+                try:
+                    if os.path.exists(save_path):
+                        os.remove(save_path)
+                except Exception:
+                    logging.error(f"[ui] Cleanup failed for {save_path}", exc_info=True)
+
+            threading.Timer(600, cleanup).start()
+
+            return save_path
+
+        export_btn.click(fn=handle_export, inputs=[chatbot], outputs=[export_btn])
+
+        def handle_import(file):
+            if file is None:
+                return gr.update()
+            try:
+                new_history = markdown_to_history(file.name)
+                # Hide onboardings if history is restored
+                return new_history, gr.update(visible=False)
+            except Exception:
+                logging.error("[ui] Import failed", exc_info=True)
+                return gr.update(), gr.update()
+
+        import_btn.upload(
+            fn=handle_import, inputs=[import_btn], outputs=[chatbot, chip_row]
+        )
 
         # ── Attribution Footer ────────────────────────────────────────────────
         gr.HTML(ATTRIBUTION_HTML)
