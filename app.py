@@ -974,6 +974,14 @@ async def condense_query(message: str, history: list[dict]) -> str:
         return message
 
 
+
+# ─── Export / Import Functions ────────────────────────────────────────────────
+MAX_IMPORT_SIZE_BYTES = 500 * 1024  # 500KB limit
+
+
+
+
+
 async def rag_stream(
     message: str, history: list[dict]
 ) -> AsyncIterator[tuple[str, str]]:
@@ -1519,29 +1527,13 @@ def build_ui() -> "gr.Blocks":
         def handle_export(history):
             if not history:
                 return None
-
             md_str = history_to_markdown(history)
-
-            # Format filename as requested: 2026-03-24_09-19.md
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-            filename = f"{timestamp}.md"
-
-            # Use os.path.join for robust path handling
+            filename = f"vexilon_chat_{timestamp}.md"
             save_path = os.path.join(tempfile.gettempdir(), filename)
-
             with open(save_path, "w", encoding="utf-8") as f:
                 f.write(md_str)
-
-            # Cleanup timer (10 mins)
-            def cleanup():
-                try:
-                    if os.path.exists(save_path):
-                        os.remove(save_path)
-                except Exception:
-                    logging.error(f"[ui] Cleanup failed for {save_path}", exc_info=True)
-
-            threading.Timer(600, cleanup).start()
-
+            threading.Timer(600, lambda: os.path.exists(save_path) and os.remove(save_path)).start()
             return save_path
 
         export_btn.click(fn=handle_export, inputs=[chatbot], outputs=[export_btn])
@@ -1551,7 +1543,7 @@ def build_ui() -> "gr.Blocks":
                 return gr.update()
             try:
                 new_history = markdown_to_history(file.name)
-                # Hide onboardings if history is restored
+                # Hide onboarding if history is restored
                 return new_history, gr.update(visible=False)
             except Exception:
                 logging.error("[ui] Import failed", exc_info=True)
