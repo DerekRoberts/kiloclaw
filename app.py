@@ -462,9 +462,18 @@ Response format:
 — [Document Name], Article/Section [X], p. [N]
 """
 
-VERIFY_STEWARD_MESSAGE = os.getenv(
-    "STEWARD_VERIFY_MESSAGE", "Verify w/ Area Office: 604-291-9611"
-)
+GLOBAL_MANDATORY_RULES = """--- MANDATORY OPERATIONAL RULES (OVERRIDING) ---
+1. ANSWER FROM EXCERPTS ONLY: Base your answer strictly on the provided excerpts. If the specific text was not retrieved, suggest the user ask about that section directly. NEVER fabricate contract language.
+2. CITATIONS: Every claim MUST be supported by a verbatim quote in a blockquote (> "...") followed by its citation (Document, Article, Page).
+3. HIERARCHY: Lead with the Collective Agreement. Use Statutes only to reinforce the legal framework.
+4. GRIEVANCE FILING (CRITICAL): If you identify a likely violation or are asked for resolution steps, you MUST proactively recommend filing a grievance. 
+   - YOU MUST APPEND a final section titled '### 📁 Resolution & Next Steps'.
+   - THIS SECTION MUST CONTAIN this link: [Download BCGEU Grievance Form](/gradio_api/file=data/labour_law/forms/BCGEU%20Grievance%20Form.pdf)
+   - YOU MUST ALSO mention the 'BCGEU Grievance Form Guide.md' for instructions.
+5. TONE: Professional, authoritative, and forensic.
+----------------------------------
+"""
+
 
 def get_persona_prompt(mode_name: str) -> str:
     """Helper to load system prompts for different operational modes."""
@@ -472,17 +481,21 @@ def get_persona_prompt(mode_name: str) -> str:
         "Direct": Path("./prompts/direct_staff_rep.txt"),
         "Defend": Path("./prompts/case_builder.txt"),
     }
-    
-    path = paths.get(mode_name)
-    if path and path.is_file():
-        return path.read_text(encoding="utf-8")
-    
-    # Fallbacks if files are missing or empty
     fallbacks = {
         "Direct": "You are a BCGEU Staff Rep providing DIRECT OPERATIONAL GUIDANCE.",
         "Defend": "You are a BCGEU Staff Rep specializing in Grievance Drafting.",
     }
-    return fallbacks.get(mode_name, SYSTEM_PROMPT)
+    
+    path = paths.get(mode_name)
+    content = path.read_text(encoding="utf-8") if path and path.is_file() else fallbacks.get(mode_name, SYSTEM_PROMPT)
+        
+    return f"{GLOBAL_MANDATORY_RULES}\n\n{content}"
+
+
+
+VERIFY_STEWARD_MESSAGE = os.getenv(
+    "STEWARD_VERIFY_MESSAGE", "Verify w/ Area Office: 604-291-9611"
+)
 
 # ─── Two-Bot Review Prompt (Bot B) ──────────────────────────────────────────────
 REVIEWER_SYSTEM_PROMPT = """You are a Senior BCGEU Staff Representative reviewing a junior steward's output for accuracy and completeness.
@@ -1367,13 +1380,16 @@ async def rag_review_stream(
     try:
         # 1. Resolve System Prompt based on Persona
         base_prompt = persona_mode if persona_mode != "Explore" else SYSTEM_PROMPT
-        if base_prompt in ["Direct", "Defend"]:
-            base_prompt = get_persona_prompt(base_prompt)
+        if persona_mode in ["Direct", "Defend"]:
+            base_prompt = get_persona_prompt(persona_mode)
 
+        # Standardized formatting for all personas
         formatted_prompt = base_prompt.format(
             manifest=get_knowledge_manifest(),
             verify_message=VERIFY_STEWARD_MESSAGE,
         )
+
+
 
         # 2. Audit Logic (Issue #161 Refactor)
         if persona_mode != "Explore":
@@ -1534,6 +1550,8 @@ CASE_BUILDER_HTML = """
 </div>
 """
 
+
+
 ATTRIBUTION_HTML = f"""
 <div style='text-align: center; color: #6b7280; font-size: 0.85rem; margin-top: 1rem;'>
     <a href='{VEXILON_REPO_URL}' target='_blank' style='color: #005691; text-decoration: none;'>View code or contribute on GitHub</a>
@@ -1551,6 +1569,7 @@ def build_ui() -> "gr.Blocks":
 
     with gr.Blocks(title="Collective Agreement Explorer") as demo:
         # ── Header ────────────────────────────────────────────────────────────
+        # ── Header ────────────────────────────────────────────────────────────
         gr.Markdown("## BCGEU Steward Assistant")
 
         with gr.Accordion("Knowledge Base & Priority", open=False):
@@ -1562,6 +1581,8 @@ def build_ui() -> "gr.Blocks":
             gr.Markdown(
                 f"[📁 Browse Knowledge Base on GitHub]({GITHUB_LABOUR_LAW_URL})"
             )
+
+
 
         # ── Disclaimer (persistent, non-dismissible) ──────────────────────────
         disclaimer_box = gr.HTML(DISCLAIMER_HTML)
@@ -1597,6 +1618,8 @@ def build_ui() -> "gr.Blocks":
             export_btn = gr.DownloadButton("⬇️ Save", variant="secondary", size="sm", scale=1, elem_classes="sm-btn")
             import_btn = gr.UploadButton("⬆️ Load", file_types=[".md"], variant="secondary", size="sm", scale=1, elem_classes="sm-btn")
 
+
+
         # ── Input row ─────────────────────────────────────────────────────────
         with gr.Row():
             msg_input = gr.Textbox(
@@ -1626,6 +1649,8 @@ def build_ui() -> "gr.Blocks":
                 top_banner = DIRECT_MODE_HTML
             elif persona_mode == "Defend":
                 top_banner = CASE_BUILDER_HTML
+
+
 
             request = kwargs.get("request")
             hide = gr.update(visible=False)
@@ -1669,6 +1694,8 @@ def build_ui() -> "gr.Blocks":
                 accumulated += chunk
                 history[-1]["content"] = accumulated
                 yield history, "", hide, gr.update(value=top_banner)
+
+
 
         submit_inputs = [msg_input, chatbot, reviewer_toggle, persona_selector]
         submit_outputs = [chatbot, msg_input, chip_row, disclaimer_box]
