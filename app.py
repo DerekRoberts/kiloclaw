@@ -39,6 +39,13 @@ import tempfile
 if not os.getenv("HF_HOME"):
     os.environ["HF_HOME"] = str(Path("./hf_cache").absolute())
 
+# Stabilize CPU usage in shared-resource environments (HF Spaces/CI)
+# Prevents thread thrashing that leads to 10+ minute hang times.
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = "1"
+if "MKL_NUM_THREADS" not in os.environ:
+    os.environ["MKL_NUM_THREADS"] = "1"
+
 # ─── Third-party: Deferred Imports ───────────────────────────────────────────
 # (numpy, anthropic, faiss, sentence_transformers, gradio)
 # are imported inside functions to keep startup and test-loading fast.
@@ -78,6 +85,7 @@ REVIEWER_MAX_TOKENS = 1536
 
 # Brain: Local Embeddings (Search) + Cloud LLM (Claude)
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")  # 512-token window
+MAX_EMBED_TOKENS = int(os.getenv("VEXILON_MAX_EMBED_TOKENS", 4096))  # Sane offset-mapping limit
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 450))  # Sized for BGE-small
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 100))
 SIMILARITY_TOP_K = int(os.getenv("SIMILARITY_TOP_K", 40))  # More context depth
@@ -288,12 +296,15 @@ def get_embed_model() -> "SentenceTransformer":
         print(f"[embed] Loading local embedding model '{EMBED_MODEL}'…")
         from sentence_transformers import SentenceTransformer
 
-        _embed_model = SentenceTransformer(EMBED_MODEL)
-        # Increase limits to handle full-page tokenization mapping without warnings.
-        # We manually chunk to 256 tokens later, so this is just to keep the logs clean.
-        _embed_model.max_seq_length = 100000
+        # Use the requested device (cpu) to avoid CUDA detection overhead.
+        # We rely on TRANSFORMERS_OFFLINE=1 (set in Containerfile) for production air-gapping.
+        _embed_model = SentenceTransformer(EMBED_MODEL, device="cpu")
+
+        # Sane limit for offset mapping (4096 is plenty for any single page).
+        # 100,000 was causing potential memory pressure and is far beyond the model's window.
+        _embed_model.max_seq_length = MAX_EMBED_TOKENS
         if hasattr(_embed_model, "tokenizer"):
-            _embed_model.tokenizer.model_max_length = 100000
+            _embed_model.tokenizer.model_max_length = MAX_EMBED_TOKENS
         print("[embed] Embedding model ready.")
     return _embed_model
 
