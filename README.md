@@ -209,7 +209,11 @@ The sanitization checks for 16+ prompt injection patterns including:
 - `jailbreak`, `developer mode`, `sudo mode`
 - And other common injection techniques
 
-When a potentially malicious input is detected, users receive a friendly message: "Your input was flagged for security review. Please try a different question."
+### Privacy & Data Retention
+
+Vexilon is a "content-blind" application. Conversations are ephemeral and tied only to your current browser session. **We do not log user queries, bot responses, or internal reasoning.** 
+
+Minimal, non-sensitive metadata (such as token counts and quality scores) is tracked for system health monitoring, but no content data ever reaches persistent storage. For a full technical disclosure of exactly what we track and why, see the [Privacy & Data Retention](SPEC.md#privacy--data-retention-updated-215) section of the project specification. 
 
 ## Hugging Face Spaces Deployment
 
