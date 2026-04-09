@@ -1,7 +1,22 @@
 # ─── Stage 0: External Binaries ──────────────────────────────────────────────
 FROM ghcr.io/astral-sh/uv:0.11.3 AS uv_source
 
-# ─── Stage 1: Builder ─────────────────────────────────────────────────────────
+# ─── Stage 1: Model Fetcher ──────────────────────────────────────────────────
+# This stage only re-runs if the model name changes.
+FROM python:3.14.3-slim AS model_fetcher
+
+COPY --from=uv_source /uv /usr/local/bin/uv
+
+# Install huggingface_hub
+RUN uv pip install --system huggingface_hub
+
+# Fetch model directly into /model_cache using the Python API.
+# This avoids shell PATH issues and wildcard copy bloat.
+# We use token=False to prevent auth attempts and satisfy security scanners.
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-small-en-v1.5', cache_dir='/root/.cache/huggingface', local_dir='/model_cache', token=False)"
+
+# ─── Stage 2: Builder ─────────────────────────────────────────────────────────
 FROM python:3.14.3-slim AS builder
 
 COPY --from=uv_source /uv /usr/local/bin/uv
@@ -12,14 +27,8 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_LINK_MODE=copy uv sync --frozen --no-dev --no-install-project
 
-# Pre-download the embedding model into a persistent image layer (using cache mount for speed)
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    HF_HOME=/root/.cache/huggingface HF_HUB_DISABLE_IMPLICIT_TOKEN=1 UV_LINK_MODE=copy uv run python -c \
-    "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" && \
-    mkdir -p /app/hf_cache && \
-    cp -r /root/.cache/huggingface/* /app/hf_cache/
 
-# ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
+# ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
 FROM python:3.14.3-slim AS runner
 
 # 1. Runtime system deps and setup (runs once, cached forever)
@@ -32,13 +41,16 @@ WORKDIR /app
 
 # ── Environment Configuration ────────────────────────────────────────────────
 # Set these early so they are active during the build-time indexing step.
+# CRITICAL: EMBED_MODEL points to the local path to ensure offline loading works reliably.
 ENV HF_HOME=/app/hf_cache \
     TRANSFORMERS_OFFLINE=1 \
+    EMBED_MODEL=/app/hf_cache \
     PATH="/app/.venv/bin:$PATH"
 
-# 2. Copy the virtualenv and model cache from the builder
+# 2. Copy the virtualenv and model cache
+# CRITICAL: We MUST chown the hf_cache so the 'vexilon' user can touch it (lock files, etc.)
 COPY --from=builder --chown=vexilon:vexilon /app/.venv /app/.venv
-COPY --from=builder /app/hf_cache /app/hf_cache
+COPY --from=model_fetcher --chown=vexilon:vexilon /model_cache /app/hf_cache
 
 # 3. Create pre-computed index using a cache mount for incremental runs
 COPY --chown=vexilon:vexilon data/ ./data/
