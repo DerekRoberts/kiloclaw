@@ -1253,7 +1253,6 @@ def build_ui() -> "gr.Blocks":
             label="Chat Messages",
             show_label=False,
             elem_id="chatbot",
-            aria_label="Conversation history",
         )
 
         # ── Reviewer Toggle & Management ──────────────────────────────────────
