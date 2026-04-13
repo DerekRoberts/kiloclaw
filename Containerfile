@@ -72,7 +72,7 @@ ENV HF_HOME=/app/hf_cache \
 
 # 2. Copy the prepared environment and code from builder
 COPY --from=builder --chown=vexilon:vexilon /app /app
-COPY --from=model_fetcher --chown=vexilon:vexilon /model_cache /app/hf_cache
+COPY --from=model_fetcher /model_cache /app/hf_cache
 
 # 3. Build index
 # Create persistent cache directory
