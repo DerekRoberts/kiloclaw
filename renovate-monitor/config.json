@@ -1,0 +1,10 @@
+{
+  "gmailAccount": "derek.roberts.bot@gmail.com",
+  "summaryEmailTo": "derek.roberts@gmail.com",
+  "readonlyOrgs": ["bcgov", "bcgov-c", "bcgov-nr", "bcdevops"],
+  "monitoredAuthors": ["Mend Renovate", "Dependabot", "renovate"],
+  "checkIntervalMinutes": 60,
+  "sweepTime": "06:30",
+  "followupTime": "07:30",
+  "workDays": [1, 2, 3, 4, 5]
+}

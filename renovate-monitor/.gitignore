@@ -1,0 +1,11 @@
+# State and logs
+state.json
+logs/
+
+# Node
+node_modules/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
