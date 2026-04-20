@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-04-17T06:03:18.884Z",
+  "updatedAt": "2026-04-19T16:58:25.214Z",
   "entries": {
     "memory:memory/2026-04-14.md:1:13": {
       "key": "memory:memory/2026-04-14.md:1:13",
@@ -9,20 +9,23 @@
       "endLine": 13,
       "source": "memory",
       "snippet": "# 2026-04-14 ## GitHub Notifications ### 8:55 PM - vexilon PR #328 Update - **From:** Derek Roberts <notifications@github.com> - **Subject:** Re: [DerekRoberts/vexilon] feat: implement Manager Mode (Secret Diplomat) persona (PR #328) - **Event:** New commit pushed - **Commit:** `68debffd3d07552a6ba5d321de5fd16574755dc1` - **Message:** \"test: synchronize test suite with renamed persona modes\" - **PR:** Manager Mode (Secret Diplomat) persona implementation - **Link:** https://github.com/DerekRoberts/vexilon/pull/328/changes/42c983a19e29ec0ff2a9a86a3d6de43f9e663857..68debffd3d07552a6ba5d321de5fd16574755dc1",
-      "recallCount": 3,
+      "recallCount": 5,
       "dailyCount": 0,
-      "totalScore": 2.187231026815433,
+      "totalScore": 3.6453850446923886,
       "maxScore": 0.7290770089384777,
       "firstRecalledAt": "2026-04-14T22:55:39.833Z",
-      "lastRecalledAt": "2026-04-17T06:03:18.884Z",
+      "lastRecalledAt": "2026-04-19T16:58:25.214Z",
       "queryHashes": [
         "984f349142a2",
         "00d6873904f4",
-        "d7d370a335d8"
+        "d7d370a335d8",
+        "564140d7494e",
+        "bc80c1bd06ab"
       ],
       "recallDays": [
         "2026-04-14",
-        "2026-04-17"
+        "2026-04-17",
+        "2026-04-19"
       ],
       "conceptTags": [
         "github.com",
