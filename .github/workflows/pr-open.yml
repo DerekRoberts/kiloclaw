@@ -116,10 +116,13 @@ jobs:
 
   container_test:
     name: Container Smoke Test
-    needs: container_build
-    if: needs.check.outputs.triggered == 'true'
+    needs: [check, container_build]
+    # Skip for Dependabot PRs - they cannot access private GHCR packages
+    if: needs.check.outputs.triggered == 'true' && !startsWith(github.head_ref, 'dependabot/')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      packages: read
 
     steps:
       - name: Pull and Start Container
